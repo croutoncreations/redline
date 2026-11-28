@@ -176,7 +176,95 @@ data class ProviderUsage(
     val pools: List<Pool> = emptyList(),
     /** Where Redline will act on the meters. Null from a desktop that sends no policy. */
     val scheduling: Scheduling? = null,
+    /**
+     * An API credits account's (OpenAI or Claude) dollar balance, already
+     * worded by the core. Set only for those providers, which has no session, weekly or pool
+     * windows; null for every other provider.
+     */
+    val credits: CreditsView? = null,
 )
+
+/**
+ * An API credits account (OpenAI or Claude). Only promotional credit is capacity: the
+ * bar and the headline are about it; other credit is shown, never scheduled.
+ */
+@Serializable
+data class CreditsView(
+    /** "\$62.40 left", "\$0.00 promo", "Last known \$62.40" or "Session key needed". */
+    val headline: String = "",
+    /** "Expires in 2 days", "No promotional credit", or the signed-out fix. */
+    val detail: String = "",
+    /** The soonest promotional grant's expiry; empty when there is none. */
+    @SerialName("expires_at") val expiresAt: String = "",
+    /** Promotional credit left of what was granted, 0-100. */
+    @SerialName("remaining_percent") val remainingPercent: Int = 0,
+    /** "\$62.40 of \$100.00 left". */
+    @SerialName("promo_label") val promoLabel: String = "",
+    /** When jobs start: the dollar floor and the pacing. */
+    @SerialName("rule_line") val ruleLine: String = "",
+    /** The "Other credit" row: "\$7.25 · shown only, never scheduled"; empty when there is none. */
+    @SerialName("paid_label") val paidLabel: String = "",
+    val grants: List<CreditGrantView> = emptyList(),
+    /**
+     * "Run now · firesale", "Held · at the floor", …: the same words as every
+     * dashboard. Empty when signed out or stale.
+     */
+    @SerialName("decision_label") val decisionLabel: String = "",
+    /** The scheduler's reason, first letter capitalised. */
+    @SerialName("decision_reason") val decisionReason: String = "",
+    @SerialName("no_promo") val noPromo: Boolean = false,
+    val stale: Boolean = false,
+    /** The platform session key is missing or expired. It is re-pasted on the computer, never here. */
+    @SerialName("signed_out") val signedOut: Boolean = false,
+)
+
+@Serializable
+data class CreditGrantView(
+    /** "ChatGPT subscription grant", "Auto recharge", "Purchased credit" or "Credit grant". */
+    val label: String = "",
+    /** "\$62.40 of \$100.00". */
+    @SerialName("amount_label") val amountLabel: String = "",
+    /** Empty when the grant reported no expiry. */
+    @SerialName("expires_at") val expiresAt: String = "",
+)
+
+/**
+ * A credit expiry as a UTC calendar date: "Thu, Nov 26", or "Fri, Oct 15,
+ * 2027" when it is not this year. "" when unparseable. Grants lapse at 00:00
+ * UTC, so the phone's own timezone would show the day before in the Americas.
+ */
+fun creditDateLabel(
+    at: String,
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    val instant = runCatching { java.time.Instant.parse(at) }.getOrNull() ?: return ""
+    val date = instant.atZone(java.time.ZoneOffset.UTC)
+    val pattern = if (date.year == now.atZone(java.time.ZoneOffset.UTC).year) "EEE, MMM d" else "EEE, MMM d, yyyy"
+    return date.format(java.time.format.DateTimeFormatter.ofPattern(pattern, locale))
+}
+
+/** The line under the dollar headline: "Expires in 2 days · Thu, Nov 26". */
+fun creditsExpiryLine(
+    credits: CreditsView,
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    // Signed out the detail is the fix; stale it is "Last sample 2 hrs ago".
+    if (credits.signedOut || credits.noPromo || credits.stale) return credits.detail
+    val date = creditDateLabel(credits.expiresAt, now, locale)
+    return listOf(credits.detail, date).filter { it.isNotEmpty() }.joinToString(" · ")
+}
+
+/** A grant's expiry for the grants list: "expires Thu, Nov 26", or "no expiry". */
+fun creditGrantExpiry(
+    grant: CreditGrantView,
+    now: java.time.Instant = java.time.Instant.now(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    val date = creditDateLabel(grant.expiresAt, now, locale)
+    return if (date.isEmpty()) "no expiry" else "expires $date"
+}
 
 @Serializable
 data class ResetCredits(
@@ -316,7 +404,8 @@ fun accountDispatchState(account: ProviderUsage): String = when {
     account.accountStatus == "error" -> "usage unavailable, dispatch held"
     account.weeklyNotReported && account.weeklyPolicy == "session_only" -> "weekly not reported, session-only scheduling"
     account.weeklyNotReported && !account.dispatching -> "dispatch held, weekly not reported"
-    account.accountStatus == "no_data" || account.weekly == null -> "no usage yet"
+    account.credits?.noPromo == true && !account.dispatching -> "dispatch held, no promotional credit"
+    account.accountStatus == "no_data" || (account.weekly == null && account.credits == null) -> "no usage yet"
     account.dispatching -> "dispatching"
     account.scheduling?.decision.isNullOrEmpty() -> "no scheduler decision yet"
     else -> "dispatch held"
@@ -494,13 +583,32 @@ fun formatCountdown(seconds: Long): String {
     }
 }
 
+/** An overview row's placeholder where the account has no weekly or credits figure. */
+data class OverviewEmptyState(val label: String, val detail: String)
+
+/**
+ * An API credits account before its first reading has no balance yet, and
+ * never a weekly allowance; subscription providers keep the weekly wording.
+ */
+fun overviewEmptyState(account: ProviderUsage): OverviewEmptyState = when {
+    isAPICreditsProvider(account.provider) -> OverviewEmptyState("Credits", "Balance not read yet")
+    account.weeklyNotReported -> OverviewEmptyState("Weekly", "Not reported")
+    else -> OverviewEmptyState("Weekly", "No usage reported")
+}
+
 /** The provider's name as people know it. */
 fun providerDisplayName(provider: String): String = when (provider.lowercase()) {
     "claude" -> "Claude"
     "codex" -> "Codex"
     "cursor" -> "Cursor"
+    "openai-api-credits" -> "OpenAI API credits"
+    "anthropic-api-credits" -> "Claude API credits"
     else -> provider.replaceFirstChar { it.uppercase() }
 }
+
+/** OpenAI and Claude (Anthropic) API credits accounts: a dollar balance, not windows. */
+fun isAPICreditsProvider(provider: String): Boolean =
+    provider.equals("openai-api-credits", ignoreCase = true) || provider.equals("anthropic-api-credits", ignoreCase = true)
 
 /**
  * The one-line status shown under a provider's name.
@@ -509,6 +617,7 @@ fun providerDisplayName(provider: String): String = when (provider.lowercase()) 
  * both mean the numbers should not be read as current.
  */
 fun providerStatus(provider: ProviderUsage): String = when {
+    provider.credits?.signedOut == true -> "Signed out"
     provider.stale && provider.staleReason.startsWith("Cursor CLI and app") -> "Accounts differ"
     provider.stale && provider.staleReason.isNotEmpty() -> "Signed out"
     provider.error.isNotEmpty() -> "No data"
@@ -523,7 +632,9 @@ fun providerStatus(provider: ProviderUsage): String = when {
  * paragraph, which is written for a wider screen.
  */
 fun providerProblem(provider: ProviderUsage): String =
-    provider.staleReason.ifEmpty { provider.error }
+    // A signed-out credits account says it in its headline and the line
+    // under it; a red copy above would only repeat it.
+    if (provider.credits?.signedOut == true) "" else provider.staleReason.ifEmpty { provider.error }
 
 /**
  * Formats when a window reopens, in the reader's own timezone.

@@ -136,6 +136,7 @@ func TestNonPullRequestRunsAreUniqueAndNeverCancel(t *testing.T) {
 		{name: "push", runID: 125},              // tag push, same event name
 		{name: "workflow_dispatch", runID: 126}, // manual
 		{name: "schedule", runID: 127},
+		{name: "merge_group", runID: 128}, // merge queue
 	}
 	for _, file := range inScope {
 		t.Run(file, func(t *testing.T) {
@@ -176,8 +177,8 @@ func TestWorkflowsDoNotShareGroups(t *testing.T) {
 func TestTriggersAndJobsUnchanged(t *testing.T) {
 	want := map[string]struct{ on, jobs []string }{
 		"ci.yml": {
-			on:   []string{"pull_request", "push", "workflow_dispatch"},
-			jobs: []string{"actionlint", "android", "dashboard", "go", "homebrew", "linux-smoke", "macos", "macos-intel", "relay", "windows-smoke"},
+			on:   []string{"merge_group", "pull_request", "push", "workflow_dispatch"},
+			jobs: []string{"actionlint", "android", "dashboard", "go", "green-lane-queue", "homebrew", "linux-smoke", "macos", "macos-intel", "relay", "windows-smoke"},
 		},
 		"claude-code-review.yml": {
 			on:   []string{"pull_request"},

@@ -167,3 +167,34 @@ func TestCursorUsageIsOmittedWhenNotConfigured(t *testing.T) {
 		t.Fatal("cursor_usage must be omitted when Cursor tracking is off")
 	}
 }
+
+func TestCursorUsageEndpointKeepsResponseEnvelope(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "redline.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := httptest.NewServer(api.NewServer(testConfig("http://127.0.0.1:1"), db, func() time.Time { return apiNow }))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/v1/cursor-usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 2 {
+		t.Fatalf("top-level fields = %v, want generated_at and cursor", body)
+	}
+	var generatedAt time.Time
+	if err := json.Unmarshal(body["generated_at"], &generatedAt); err != nil || !generatedAt.Equal(apiNow) {
+		t.Fatalf("generated_at = %s, want %s (err=%v)", generatedAt, apiNow, err)
+	}
+	if got := string(body["cursor"]); got != "null" {
+		t.Fatalf("cursor = %s, want null when Cursor tracking is off", got)
+	}
+}

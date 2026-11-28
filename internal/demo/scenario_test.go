@@ -16,7 +16,7 @@ import (
 )
 
 func TestScenariosAreStableAndDocumented(t *testing.T) {
-	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown", "multi-account"}
+	want := []string{"overview", "running", "attention", "empty", "decision-wait", "decision-run", "decision-run-near-expiry", "decision-unknown", "multi-account", "api-credits", "claude-credits"}
 	got := demo.Scenarios()
 	if len(got) != len(want) {
 		t.Fatalf("scenarios = %#v", got)
@@ -209,6 +209,38 @@ func TestExecutorCompletesDecisionTaskWithBelievableResult(t *testing.T) {
 	}
 }
 
+// A run on the Claude credits demo profile is labelled a Claude run.
+func TestExecutorLabelsClaudeCreditsRunsAsClaude(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	env, err := demo.Create(ctx, "claude-credits", root, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	task, err := env.Database.GetTask(ctx, "docs-sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := env.Database.AdmitTask(ctx, "take-claude-credits", task.ID, "claude-credits", "demo-revision", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := demo.Executor{Store: env.Database, Root: root, Now: func() time.Time { return now }, Delay: time.Millisecond}
+	profile := domain.ExecutionProfile{ProviderAccountID: "claude-credits", HarnessType: "claude-code", Model: "claude-sonnet-4-6"}
+	if err := executor.Execute(ctx, run, task, profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := env.Database.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActualProvider != "claude" || got.ActualModel != "claude-sonnet-4-6" {
+		t.Fatalf("run provider/model = %q/%q", got.ActualProvider, got.ActualModel)
+	}
+}
+
 // The API launches executors with context.Background(), so a long recording
 // delay must also end when the demo process shuts down, or Ctrl-C would hang
 // for up to --run-duration.
@@ -267,5 +299,68 @@ func TestMultiAccountScenarioKeepsEachAccountsOwnUsage(t *testing.T) {
 		if err != nil || got.Plan != want || got.Account != account {
 			t.Fatalf("%s = %+v, %v", account, got, err)
 		}
+	}
+}
+
+// The API credits scene adds a synthetic credits account in its firesale
+// window, with a pi job queued against it.
+func TestAPICreditsScenarioShowsAnExpiringBalance(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	env, err := demo.Create(context.Background(), "api-credits", t.TempDir(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	snapshot, _, err := env.Database.LatestSnapshot(context.Background(), "api-credits", config.ProviderAPICredits)
+	if err != nil || snapshot.Credits == nil || snapshot.Credits.PromoRemaining != 62.4 || snapshot.Credits.PaidAvailable != 7.25 {
+		t.Fatalf("snapshot = %+v, %v", snapshot, err)
+	}
+	if !env.Config.Providers["api-credits"].IsAPICredits() {
+		t.Fatal("api-credits is not a credits account")
+	}
+	profiles, err := env.Database.ListProfiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, profile := range profiles {
+		found = found || (profile.ProviderAccountID == "api-credits" && profile.HarnessType == "pi")
+	}
+	if !found {
+		t.Fatal("no pi profile on the credits account")
+	}
+}
+
+// The Claude credits scene is the same expiring balance on a synthetic
+// Claude Console organization, with a claude-code job queued against it.
+func TestClaudeCreditsScenarioShowsAnExpiringBalance(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	env, err := demo.Create(context.Background(), "claude-credits", t.TempDir(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Close()
+	snapshot, _, err := env.Database.LatestSnapshot(context.Background(), "claude-credits", config.ProviderAnthropicAPICredits)
+	if err != nil || snapshot.Credits == nil || snapshot.Credits.PromoRemaining != 62.4 || snapshot.Credits.PaidAvailable != 7.25 {
+		t.Fatalf("snapshot = %+v, %v", snapshot, err)
+	}
+	account := env.Config.Providers["claude-credits"]
+	if account.APICreditsVendor() != config.APICreditsVendorAnthropic || account.APICredits == nil ||
+		!config.ValidConsoleOrganizationID(account.APICredits.OrganizationID) {
+		t.Fatalf("claude-credits = %+v", account)
+	}
+	if _, ok := env.Config.Providers["api-credits"]; ok {
+		t.Fatal("the Claude scene also shows the OpenAI credits account")
+	}
+	profiles, err := env.Database.ListProfiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, profile := range profiles {
+		found = found || (profile.ProviderAccountID == "claude-credits" && profile.HarnessType == "claude-code")
+	}
+	if !found {
+		t.Fatal("no claude-code profile on the Claude credits account")
 	}
 }

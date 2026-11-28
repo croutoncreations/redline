@@ -105,7 +105,8 @@ func completedAutomatedReview(pr PRInfo) bool {
 				Security json.RawMessage `json:"security_review"`
 			}
 			if summaryJSON(summaryPayload(c.Body, "<!-- codex-review-state:v1 "), &state) == nil && completedCodexComponent(state.Code, pr.HeadSHA) &&
-				(len(state.Security) == 0 || bytes.Equal(bytes.TrimSpace(state.Security), []byte("null")) || completedCodexComponent(state.Security, pr.HeadSHA)) {
+				(len(state.Security) == 0 || bytes.Equal(bytes.TrimSpace(state.Security), []byte("null")) || completedCodexComponent(state.Security, pr.HeadSHA) ||
+					cleanNullSecurityReview(state.Security, c.Body, pr)) {
 				return true
 			}
 		}
@@ -123,6 +124,55 @@ func completedCodexComponent(raw json.RawMessage, head string) bool {
 		Unresolved *bool  `json:"has_unresolved_findings"`
 	}
 	return summaryJSON(raw, &review) == nil && review.Commit == head && review.Status == "completed" && review.Findings != nil && review.Unresolved != nil && !*review.Unresolved
+}
+
+// Codex's security review often finishes with both findings flags null
+// (openai/codex#57326). In this repo every such summary since Oct 27 came
+// with no security finding, while real findings set both flags true, post a
+// "codex-security-review-finding" inline comment and a COMMENTED review.
+// Accept the null form only when all of these hold, so an unknown verdict is
+// never read as clean on its own:
+//   - status "completed" on the exact head, with both flags exactly null;
+//   - exactly one codex-security-review:v1 marker, status "completed", for
+//     this repository, PR and head;
+//   - no Codex security-finding comment on the PR at all, resolved or not.
+func cleanNullSecurityReview(raw json.RawMessage, body string, pr PRInfo) bool {
+	// encoding/json maps JSON null and a missing key to the same nil
+	// pointer, so read the raw object to require both keys to be literally
+	// null. summaryJSON still rejects unknown or duplicate keys.
+	var review struct {
+		Commit     string          `json:"commit_sha"`
+		Status     string          `json:"status"`
+		Findings   json.RawMessage `json:"has_any_findings"`
+		Unresolved json.RawMessage `json:"has_unresolved_findings"`
+	}
+	var keys map[string]json.RawMessage
+	if summaryJSON(raw, &review) != nil || json.Unmarshal(raw, &keys) != nil || review.Commit != pr.HeadSHA || review.Status != "completed" {
+		return false
+	}
+	for _, k := range []string{"has_any_findings", "has_unresolved_findings"} {
+		if v, ok := keys[k]; !ok || !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			return false
+		}
+	}
+	var marker struct {
+		Threshold  string `json:"blockingSeverityThreshold"`
+		Head       string `json:"headSha"`
+		MergeGate  bool   `json:"mergeGateEnabled"`
+		PR         int    `json:"pullRequestNumber"`
+		Repository string `json:"repository"`
+		Status     string `json:"status"`
+	}
+	if summaryJSON(summaryPayload(body, "<!-- codex-security-review:v1 "), &marker) != nil ||
+		marker.Status != "completed" || marker.Head != pr.HeadSHA || marker.PR != pr.Number || marker.Repository != pr.Repository {
+		return false
+	}
+	for _, c := range pr.ReviewComments {
+		if strings.Contains(c.Body, "<!-- codex-security-review-finding:v1 -->") {
+			return false
+		}
+	}
+	return true
 }
 
 // Original author/App attribution survives edits by repository writers.

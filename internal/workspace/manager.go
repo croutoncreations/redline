@@ -189,7 +189,7 @@ func (m Manager) runSetupHook(
 	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: shellName, Args: shellArgs, Dir: prepared.Directory,
-		Env: append(os.Environ(),
+		Env: append(redprocess.ServiceEnvironment(),
 			"REDLINE_RUN_ID="+runID,
 			"REDLINE_TASK_NAME="+taskName,
 			"REDLINE_REPO="+profile.Repository,
@@ -325,7 +325,7 @@ func (m Manager) prepareCommand(
 	shellName, shellArgs := redprocess.ShellCommand(profile.PrepareCommand)
 	exitCode, err := m.runner().Run(ctx, redprocess.Command{
 		Name: shellName, Args: shellArgs, Dir: profile.Repository,
-		Env: append(os.Environ(),
+		Env: append(redprocess.ServiceEnvironment(),
 			"REDLINE_RUN_ID="+runID,
 			"REDLINE_TASK_NAME="+taskName,
 			"REDLINE_REPO="+profile.Repository,
@@ -409,7 +409,7 @@ func (m Manager) artifactWriters(runID, phase string) (io.Writer, io.Writer, fun
 }
 
 func hookEnvironment(request FinalizeRequest) []string {
-	return append(os.Environ(),
+	return append(redprocess.ServiceEnvironment(),
 		"REDLINE_RUN_ID="+request.RunID,
 		"REDLINE_TASK_ID="+request.TaskID,
 		"REDLINE_RUN_STATUS="+request.Status,

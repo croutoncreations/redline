@@ -86,6 +86,12 @@ private func delivery(_ id: Int64, _ type: String, title: String? = "Codex reset
     #expect(legacy.message == "reset.redeemed")
 }
 
+@Test func aCreditsAccountThatNeedsASessionKeyIsShownWithSound() throws {
+    let event = try delivery(4, "account.session_key_needed", title: "Linked org needs a fresh OpenAI session key")
+    #expect(event.shouldNotify)
+    #expect(event.hasSound)
+}
+
 @Test func aSeatThatNeedsSigningInIsShownWithSound() throws {
     let event = try delivery(3, "account.needs_login", title: "Frank needs to sign in to Claude Code")
     #expect(event.shouldNotify)

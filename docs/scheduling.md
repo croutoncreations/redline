@@ -40,6 +40,215 @@ Manual or announcement firesales can unlock the firesale tier but cannot spend t
 session reserve. Use duration-based manual firesales; `--until-reset` requires a
 reported weekly reset. Calibration never invents a weekly number for these seats.
 
+## OpenAI API credits
+
+Eligible ChatGPT Pro and Business subscriptions grant monthly
+[API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) to one linked
+OpenAI API organization. They expire at the end of each billing cycle and do not roll over.
+An `openai-api-credits` account lets Redline show that balance and spend it on queued work
+before it lapses.
+
+- **What counts.** Only *promotional* grants (the subscription benefit) that are in effect and
+  have money left. Purchased and auto-recharge credit is shown on every dashboard but is never
+  scheduling capacity.
+- **Floor.** No job starts while the promotional balance is at or below `min_promo_balance`
+  (default $5). The floor is checked when a job starts, and a running job is not stopped, so
+  each run already in flight reserves `run_cost_estimate` (default $1): another run starts only
+  while the balance minus those reservations stays above the floor. Raise the estimate for
+  expensive jobs (a run can still spend more than it reserves), or set it to 0 to turn the
+  reservation off. For a hard cap, give Redline a key from a dedicated OpenAI project with an
+  enforced [spend limit](https://developers.openai.com/api/docs/guides/spend-limits).
+- **Pacing.** `firesale` (default) holds the balance until a single grant expiring within
+  `firesale_window` (default 72h) still holds at least `min_promo_balance` (and at least $0.01),
+  then runs queued work at the firesale tier. Smaller grants about to lapse do not trigger it on
+  their own: with a $5 floor, $1 expiring tomorrow and $100 expiring next month, work holds.
+  `even` runs work whenever a grant has more left than the share of its cycle still to go.
+  A manual firesale overrides pacing, never the floor. Stale or unreadable balances are UNKNOWN
+  and hold.
+- **Which jobs.** Only `pi` and `command` profiles can use the account: each run is given the
+  account's own API key as `OPENAI_API_KEY` (and its organization), after any inherited OpenAI
+  key, organization, project or base URL is removed. OpenAI's terms exclude Codex usage
+  through API keys, and Claude Code and Cursor bill elsewhere, so those profiles are refused.
+  With no saved API key, work holds rather than inherit whatever key the service has.
+  Such runs also get `REDLINE_OPENAI_API_CREDITS=1`, so tools inside them can tell they must
+  bill the API key: for example, a pi extension that moves `openai/*` models to a ChatGPT
+  subscription should leave them alone when it is set. Every run gets
+  `REDLINE_PROVIDER_ACCOUNT_ID`. Neither variable, nor the session key, is ever passed through from the
+  service to a run or a workspace prepare or finalize hook.
+
+```yaml
+providers:
+  api-credits:
+    provider: openai-api-credits
+    label: Linked org
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: org-…        # empty reads the session's default organization; required on every credits account when there is more than one
+      min_promo_balance: 5          # USD
+      run_cost_estimate: 1          # USD each run in flight reserves against the floor
+      pacing: firesale              # or even
+      firesale_window: 72h
+      # session_key_file: /abs/path # optional: read the session key from a private file
+      # api_key_file: /abs/path     # optional: read the run API key from a private file
+```
+
+### Keys
+
+OpenAI exposes the grant list only to the platform dashboard, so Redline needs the browser
+**session key** (`sess-…`): on platform.openai.com › Settings › Billing › Credit grants, open
+the browser's developer tools, select the `credit_grants` request and copy its `Authorization`
+value. API keys and Codex sign-ins are rejected by that endpoint. The session key carries your
+full dashboard access; Redline sends it only to the credit grants endpoint (no redirects), never
+logs or displays it, and never sends it to phones or the relay. When it expires the account
+shows "Session key needed"; paste a fresh one.
+
+Keys are entered only on the machine running Redline, from standard input:
+
+```bash
+redline account add-openai-credits api-credits --org org-… --label "Linked org"
+pbpaste | redline account set-session-key api-credits
+pbpaste | redline account set-api-key api-credits      # an sk-… key from that organization
+```
+
+To remove both saved keys later (work on the account then holds until new ones are saved):
+
+```bash
+redline account clear-keys api-credits
+```
+
+They are stored in the login Keychain on macOS (a locked or unreachable Keychain is reported,
+in the service log at start and on the account, rather than treated as "no key") and in
+owner-only files beside the config elsewhere (`REDLINE_SECRETS_DIR` overrides the directory). A headless service can instead read
+`session_key_file`/`api_key_file` (owner-only, not a symlink, re-read every poll, so a secret
+manager can rotate them) or take `REDLINE_OPENAI_SESSION_KEY`, which the service removes from
+its environment at start so no job inherits it. A configured key file takes precedence over a
+saved key: `set-session-key` and `set-api-key` still save, but warn that the file stays in use.
+On Windows, Redline does not verify a configured key file's ACL (it still refuses symlinks):
+protect the file yourself so only your user can read it. Keys Redline saves itself get an
+owner-only ACL.
+
+When the session key is missing or OpenAI rejects it, work on the account holds and an
+`account.session_key_needed` notification is sent once (again only after a successful read in
+between; a service restart may repeat it once). Like `account.needs_login` it is opt-in: add it to
+`notifications.events`. The alert names the fix and never contains key material.
+
+## Claude (Anthropic) API credits
+
+Claude subscriptions can grant API credit to a linked
+[Claude Console](https://platform.claude.com) organization, as a promotional tranche that
+expires. An `anthropic-api-credits` account is the same feature as
+[OpenAI API credits](#openai-api-credits), with the same `api_credits:` settings, floor,
+in-flight reservation, pacing, firesale window, notifications and dashboards (labelled
+"Claude API credits"). The differences:
+
+- **What counts.** Only `subscription_api_credit` tranches that have started, have not
+  expired and have money left. Purchased tranches and other promotional programs are shown
+  but never scheduling capacity. A response Redline does not fully understand (another
+  currency, a tranche without a program, an unreadable date or amount) makes the balance
+  UNKNOWN, and work holds.
+- **Organization.** `organization_id` is the Console organization's UUID. Left empty,
+  Redline uses the one organization with API access; when several have it, set it. With
+  more than one Claude credits account, every one of them must set `organization_id`, even
+  if each session sees only one organization. Two accounts cannot name the same
+  organization.
+- **Which jobs.** `claude-code`, `pi` and `command` profiles. Codex, Cursor Agent and Hermes
+  profiles are refused. Each run first loses every inherited Anthropic credential, routing
+  and cloud switch: every `ANTHROPIC_*` variable, every `CLAUDE_CODE_USE_*`,
+  `CLAUDE_CODE_OAUTH_*`, `CLAUDE_CODE_API_*` and `CLAUDE_CODE_GATEWAY_*` variable, and
+  `AWS_BEARER_TOKEN_BEDROCK` (case-insensitively on Windows). It is then given the account's
+  API key as `ANTHROPIC_API_KEY` and `REDLINE_ANTHROPIC_API_CREDITS=1`. The key is never put
+  in a command line, and a profile's `harness_args` may not add pi's `--api-key`,
+  `--provider`, `-e`, `--extension`, `--model` or `--models`, or Claude Code's `--settings`
+  or `--setting-sources` (on an OpenAI credits account, pi's `--api-key`, `--model` and
+  `--models` are refused too).
+  - **Claude Code can spend these credits**, unlike Codex on OpenAI. Each run starts with a
+    fresh, empty, private `CLAUDE_CONFIG_DIR` that is removed afterwards, so a stored Claude
+    subscription login can't take precedence over the key. A Claude credits account never
+    has a Claude Code profile directory. Each run also passes `--setting-sources=`, so no
+    user, project or local settings file is loaded: a repository's `.claude/settings.json`
+    could otherwise set `ANTHROPIC_BASE_URL` and send the key to another host.
+  - **pi** profiles need an `anthropic/…` model (not empty or `default`). pi prefers a
+    stored Anthropic login over `ANTHROPIC_API_KEY`, so Redline loads a small extension of its
+    own with `-e` (written to a private run directory, never containing a key, removed
+    afterwards). It moves `anthropic` and `anthropic-cli` models onto a provider that reads
+    `$ANTHROPIC_API_KEY`, and ends the run (exit status 78) rather than let it continue on
+    any other model, or send a request on any other provider. A pi extension of your own that
+    reroutes Anthropic models should leave them alone while `REDLINE_ANTHROPIC_API_CREDITS`
+    is set.
+  - **command** jobs get the environment and, like Claude Code runs, a fresh, empty, private
+    `CLAUDE_CONFIG_DIR`, so a `claude` they start spends the key. Redline does not control
+    that command line, so a command job that starts `claude` should pass
+    `--setting-sources=` itself; without it, a `.claude/settings.json` in the workspace can
+    set `ANTHROPIC_BASE_URL` and send the key to another host. They do not get the pi
+    extension: a command job that starts pi must pass `-e` with an equivalent extension
+    itself, or use a `pi` profile instead.
+  - A run's private directories are removed when it ends; any a crashed service left behind
+    are removed at the next start once they are a day old.
+- **Hard cap.** The floor gates job starts; it does not stop a running job. For a hard
+  limit, create a dedicated `redline` workspace in the Console organization, give it a spend
+  limit, and give Redline an API key from that workspace.
+
+```yaml
+providers:
+  claude-credits:
+    provider: anthropic-api-credits
+    label: Console org
+    window_weekly_cost: 0.05
+    api_credits:
+      organization_id: 00000000-0000-0000-0000-000000000000   # the Console org UUID; empty uses the only org with API access
+      min_promo_balance: 5
+      run_cost_estimate: 1
+      pacing: firesale
+      firesale_window: 72h
+```
+
+### Claude keys
+
+The Console's credit balance is only available to a signed-in browser, so Redline needs the
+**session key**: the `sessionKey` cookie (`sk-ant-sid…`) for platform.claude.com, from the
+browser's developer tools (Application or Storage › Cookies). It carries your full Console
+access. Redline sends it only to the Console's organizations and prepaid credits endpoints on
+platform.claude.com (no redirects), never logs or displays it, and never sends it to phones
+or the relay. The run **API key** is a personal key (`sk-ant-usr…`) or service account key
+(`sk-ant-svc…`), or a legacy workspace key (`sk-ant-api…`), from the same linked organization.
+It **must be scoped to one workspace**: an unscoped personal or service account key needs an
+`anthropic-workspace-id` header on every request, which Redline can't add inside Claude Code or
+pi. Use a personal key scoped to a dedicated `redline` workspace with a spend limit. Session
+cookies, subscription (OAuth, `sk-ant-oat…`) tokens and Admin keys (`sk-ant-admin…`) are refused.
+Each command checks the key's prefix, and an OpenAI key given to a Claude account (or the
+reverse) is refused with a message saying so.
+
+Copy the session key, then add the account in one command:
+
+```bash
+pbpaste | redline account add-claude-credits claude-credits --session-key-stdin --label "Personal"
+pbpaste | redline account set-api-key claude-credits       # sk-ant-usr… scoped to the redline workspace
+redline account clear-keys claude-credits                  # later, to remove both
+```
+
+With the session key piped and no `--organization-id`, Redline asks the Console which
+organizations that login belongs to, saves the one with API access as `organization_id`, and
+prints its UUID and name. Nothing is saved if the lookup fails: a rejected session key asks for
+a fresh `sessionKey` cookie; a login with no API organization needs the subscription's API
+credit linked in claude.ai Settings › Billing; a login with several lists each UUID and name so
+you can rerun with `--organization-id <uuid>`. An organization another account already reads
+is refused, naming that account. Every Claude credits account needs its own organization once
+there is more than one.
+
+To give the organization yourself (no lookup), pass it, with or without the piped key:
+
+```bash
+pbpaste | redline account add-claude-credits claude-credits --organization-id <uuid> --session-key-stdin
+redline account add-claude-credits claude-credits --organization-id <uuid>
+pbpaste | redline account set-session-key claude-credits   # the sessionKey cookie, if not piped above
+```
+
+Storage (Keychain service `ai.redline.api-credits`, or owner-only files), the
+`session_key_file`/`api_key_file` options and the `account.session_key_needed` notification
+work as for OpenAI. The alert names platform.claude.com. `REDLINE_OPENAI_SESSION_KEY` never
+serves a Claude account, and there is no Claude equivalent: use a saved key or
+`session_key_file`.
+
 ## Manual firesales
 
 Start an on-demand firesale for **any configured provider account**, not just Codex:

@@ -27,6 +27,15 @@ type runUsage struct {
 	CacheWrite               int64 `json:"cache_write"`
 }
 
+// hasNegative reports whether any raw counter is negative. It must run before
+// subtraction, clamping or alias selection, which would otherwise hide a
+// malformed counter from nonzeroObservations.
+func (u runUsage) hasNegative() bool {
+	return u.InputTokens < 0 || u.CachedInputTokens < 0 || u.OutputTokens < 0 ||
+		u.CacheReadInputTokens < 0 || u.CacheCreationInputTokens < 0 ||
+		u.Input < 0 || u.Output < 0 || u.CacheRead < 0 || u.CacheWrite < 0
+}
+
 type claudeModelUsage struct {
 	InputTokens              int64 `json:"inputTokens"`
 	OutputTokens             int64 `json:"outputTokens"`
@@ -94,7 +103,7 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 			}
 			result = claudeRunObservations(record, runID, configuredModel, observedAt)
 		case "codex-cli":
-			if record.Type != "turn.completed" {
+			if record.Type != "turn.completed" || record.Usage.hasNegative() {
 				continue
 			}
 			// Overwrite rather than accumulate. turn.completed.usage is
@@ -119,7 +128,7 @@ func LoadRunArtifact(path, harnessType, runID, configuredModel string, observedA
 				Confidence: "high",
 			}}
 		case "hermes":
-			if record.Type != "hermes.result" {
+			if record.Type != "hermes.result" || record.Usage.hasNegative() {
 				continue
 			}
 			model := record.Model
@@ -210,7 +219,10 @@ func claudeRunObservations(record runRecord, runID, configuredModel string, obse
 func nonzeroObservations(items []capacity.TokenObservation) []capacity.TokenObservation {
 	result := items[:0]
 	for _, item := range items {
-		if item.InputTokens+item.OutputTokens+item.CacheReadTokens+item.CacheCreationTokens > 0 {
+		if item.InputTokens < 0 || item.OutputTokens < 0 || item.CacheReadTokens < 0 || item.CacheCreationTokens < 0 {
+			continue
+		}
+		if item.InputTokens > 0 || item.OutputTokens > 0 || item.CacheReadTokens > 0 || item.CacheCreationTokens > 0 {
 			result = append(result, item)
 		}
 	}

@@ -1,0 +1,62 @@
+{
+  "object": "credit_summary",
+  "total_granted": 245.5,
+  "total_used": 128.25,
+  "total_available": 117.25,
+  "total_paid_available": 7.25,
+  "grants": {
+    "object": "list",
+    "data": [
+      {
+        "object": "credit_summary",
+        "id": "chatgpt_api_credits_promo_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "grant_amount": 120.0,
+        "used_amount": 10.0,
+        "effective_at": 1767225600.0,
+        "expires_at": 1769904000.0,
+        "is_scheduled": false,
+        "is_held_for_prepaid_transition": false
+      },
+      {
+        "object": "credit_summary",
+        "id": "auto_recharge_grant_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "grant_amount": 6.0,
+        "used_amount": 1.75,
+        "effective_at": 1764547200.0,
+        "expires_at": 1796083200.0,
+        "is_scheduled": false,
+        "is_held_for_prepaid_transition": false
+      },
+      {
+        "object": "credit_summary",
+        "id": "auto_recharge_grant_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "grant_amount": 3.0,
+        "used_amount": 0.0,
+        "effective_at": 1766000000.0,
+        "expires_at": 1797536000.0,
+        "is_scheduled": false,
+        "is_held_for_prepaid_transition": false
+      },
+      {
+        "object": "credit_summary",
+        "id": "chatgpt_api_credits_promo_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "grant_amount": 90.0,
+        "used_amount": 90.0,
+        "effective_at": 1764547200.123,
+        "expires_at": null,
+        "is_scheduled": false,
+        "is_held_for_prepaid_transition": false
+      },
+      {
+        "object": "credit_summary",
+        "id": "in_TESTINVOICE000000000001",
+        "grant_amount": 26.5,
+        "used_amount": 26.5,
+        "effective_at": 1761955200.0,
+        "expires_at": null,
+        "is_scheduled": false,
+        "is_held_for_prepaid_transition": false
+      }
+    ]
+  }
+}
