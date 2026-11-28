@@ -25,6 +25,34 @@ const (
 	DispatchFiresale   DispatchTier = "firesale"
 )
 
+// Rank orders tiers by how much allowance pressure they represent: firesale
+// outranks expiring, which outranks well_behind, which outranks behind. An
+// empty or unrecognized tier ranks 0, below every real tier.
+func (t DispatchTier) Rank() int {
+	switch t {
+	case DispatchFiresale:
+		return 4
+	case DispatchExpiring:
+		return 3
+	case DispatchWellBehind:
+		return 2
+	case DispatchBehind:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// Unlocks reports whether a provider whose unlocked tier is t may run a task
+// that requires the given tier. A task with no required tier defaults to
+// DispatchBehind, the lowest real tier.
+func (t DispatchTier) Unlocks(required DispatchTier) bool {
+	if required == "" {
+		required = DispatchBehind
+	}
+	return t.Rank() >= required.Rank()
+}
+
 type ExecutionProfile struct {
 	ID                string    `json:"id"`
 	ProviderAccountID string    `json:"provider_account_id"`
