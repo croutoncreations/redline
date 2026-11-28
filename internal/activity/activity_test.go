@@ -96,6 +96,37 @@ func TestBuildPreservesPublishedLinkFromEarlierAssistantSummary(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesBalancedParenthesisAtEndOfLink(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "run.stdout.jsonl")
+	const want = "https://en.wikipedia.org/wiki/Function_(mathematics)"
+	body := `{"type":"item.completed","item":{"type":"agent_message","text":"See ` + want + ` and (https://example.com/docs)."}}` + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if len(got.Artifacts) != 2 || got.Artifacts[0].URL != want || got.Artifacts[1].URL != "https://example.com/docs" {
+		t.Fatalf("artifacts = %#v, want URL %q", got.Artifacts, want)
+	}
+}
+
+func TestBuildTrimsPunctuationInsideUnmatchedClosers(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "run.stdout.jsonl")
+	const pr = "https://github.com/acme/app/pull/53"
+	const docs = "https://example.com/docs"
+	body := `{"type":"item.completed","item":{"type":"agent_message","text":"Opened (**` + pr + `**) (See ` + docs + `.)"}}` + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activity.Build(activity.Input{State: domain.RunCompleted, OutputFile: output})
+	if len(got.Artifacts) != 2 || got.Artifacts[0].URL != pr || got.Artifacts[0].Type != "pull_request" || got.Artifacts[1].URL != docs {
+		t.Fatalf("artifacts = %#v, want %q and %q", got.Artifacts, pr, docs)
+	}
+}
+
 func TestBuildMakesFailureHumanReadable(t *testing.T) {
 	got := activity.Build(activity.Input{
 		State: domain.RunFailed, Error: "Claude Code is signed out. Run `claude auth login`, then retry this job.",
@@ -120,7 +151,7 @@ func TestBuildPreservesMaximumLengthPlainTextSummary(t *testing.T) {
 
 func TestBuildIgnoresUnreadableOutputFileInsteadOfReturningGarbage(t *testing.T) {
 	// OutputFile points at a directory: os.Open/Stat succeed, but ReadAt fails.
-	// readTail must surface that error so Build falls back to the default
+	// artifacts.ReadFileTail must surface that error so Build falls back to the default
 	// summary instead of treating a zero-filled buffer as real output.
 	dir := t.TempDir()
 

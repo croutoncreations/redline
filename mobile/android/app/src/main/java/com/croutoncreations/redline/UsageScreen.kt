@@ -49,7 +49,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.BoxWithConstraintsScope
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -507,8 +509,12 @@ internal fun CursorUsageCard(cursor: CursorUsage) {
 @Composable
 private fun CursorMeterRow(meter: CursorMeter, lastKnown: Boolean) {
     val label = (if (lastKnown) "Last known " else "") + meter.label
+    // Same rule as the provider meters: old numbers against the present clock
+    // say nothing true, so no mark for them.
+    val showPace = meter.hasLimit && meter.elapsedPercent > 0 && !lastKnown
     Column(modifier = Modifier.semantics {
-        contentDescription = "$label: ${meter.valueLabel}. ${cursorMeterDetail(meter)}"
+        contentDescription = "$label: ${meter.valueLabel}. ${cursorMeterDetail(meter)}" +
+            if (showPace) paceSentence(paceOf(meter.remainingPercent, meter.elapsedPercent)) else ""
     }) {
         Row {
             Text(label, color = TextPrimary, fontSize = 13.sp)
@@ -523,14 +529,21 @@ private fun CursorMeterRow(meter: CursorMeter, lastKnown: Boolean) {
         }
         if (meter.hasLimit) {
             Spacer(Modifier.height(6.dp))
-            // What is left, the same direction and colours as the provider
-            // meters above it.
-            LinearProgressIndicator(
-                progress = { meter.remainingPercent / 100f },
-                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                color = toneFor(meter.remainingPercent),
-                trackColor = Line,
-            )
+            // What is left, the same direction, colours and pace mark as the
+            // provider meters above it.
+            BoxWithConstraints(Modifier.fillMaxWidth().height(14.dp)) {
+                LinearProgressIndicator(
+                    progress = { meter.remainingPercent / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = toneFor(meter.remainingPercent),
+                    trackColor = Line,
+                )
+                if (showPace) PaceMark(meter.elapsedPercent, maxWidth)
+            }
         }
         Spacer(Modifier.height(4.dp))
         Text(cursorMeterDetail(meter), color = TextMuted, fontSize = 11.sp)
@@ -550,6 +563,10 @@ private fun ProviderCard(
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (provider.credits != null) {
+                    CreditsGlyph()
+                    Spacer(Modifier.width(8.dp))
+                }
                 Text(
                     providerDisplayName(provider.provider),
                     color = TextPrimary,
@@ -628,6 +645,8 @@ internal fun ProviderDetails(
             // so a minute tick keeps those judgements true while it sits open.
             if (staleNumbers) MinuteTick()
 
+            provider.credits?.let { CreditsHeadline(it) }
+
             provider.session?.let {
                 Spacer(Modifier.height(12.dp))
                 Meter(
@@ -672,7 +691,26 @@ internal fun ProviderDetails(
             }
             // A seat with no weekly limit already says dispatch holds, just
             // above; a red "Waiting" line would only repeat it as alarm.
-            provider.scheduling?.takeIf { !staleNumbers && !(provider.weeklyNotReported && !it.admits) }?.let { scheduling ->
+            // A credits account says its decision in the dashboards' words,
+            // and nothing at all when signed out or stale.
+            provider.credits?.takeIf { it.decisionLabel.isNotEmpty() }?.let { credits ->
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(creditsDecisionTone(provider)),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        listOf(credits.decisionLabel, credits.decisionReason).filter { it.isNotEmpty() }.joinToString(" · "),
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+            provider.scheduling?.takeIf { provider.credits == null && !staleNumbers && !(provider.weeklyNotReported && !it.admits) }?.let { scheduling ->
                 val line = schedulingLine(scheduling)
                 if (line.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
@@ -688,6 +726,7 @@ internal fun ProviderDetails(
                     }
                 }
             }
+            provider.credits?.let { CreditsBreakdown(it) }
             // Worth showing beside an exhausted window, because spending one is
             // what gets work moving again. Labelled in full: a bare number here
             // would read as yet another usage meter. A credit's own deadline
@@ -714,7 +753,13 @@ internal fun ProviderDetails(
                     }
                     ) +
                 (if (expired > 0) " · $expired since expired" else "")
-            if (credits.isNotEmpty()) {
+            val kinds = provider.resetCredits?.kinds.orEmpty()
+            // By kind only from fresh numbers; out of date (on any card) keeps
+            // the count with "last known" deadlines.
+            if (credits.isNotEmpty() && kinds.isNotEmpty() && !provider.isOutOfDate) {
+                Spacer(Modifier.height(10.dp))
+                BankedResetKinds(provider, kinds, expanded = accountPage)
+            } else if (credits.isNotEmpty()) {
                 val count = provider.resetCredits?.available ?: provider.bankedResets
                 Spacer(Modifier.height(10.dp))
                 val creditsColor = if ((count ?: 0) > 0 && !staleNumbers) TextPrimary else TextMuted
@@ -866,6 +911,30 @@ private fun BoxWithConstraintsScope.SchedulerLine(x: Dp, maxWidth: Dp, color: Co
     )
 }
 
+/** What TalkBack says for a pace mark, appended to the meter's sentence. */
+private fun paceSentence(pace: Pace): String = when (pace) {
+    Pace.AHEAD -> ". Ahead of pace"
+    Pace.BEHIND -> ". Behind pace"
+    Pace.ON_PACE -> ". On pace"
+}
+
+/**
+ * Where the bar's edge would be if the window were spent evenly: a white
+ * line taller than the bar, shared by every meter so it reads the same.
+ */
+@Composable
+private fun PaceMark(elapsedPercent: Int, maxWidth: androidx.compose.ui.unit.Dp) {
+    val mark = paceMarkPercent(elapsedPercent)
+    Box(
+        Modifier
+            .offset(x = (maxWidth * mark / 100f - 1.dp).coerceIn(0.dp, maxWidth - 2.dp))
+            .width(2.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(1.dp))
+            .background(TextPrimary),
+    )
+}
+
 /** The scheduler's lines on one meter. Empty draws nothing. */
 data class MeterZones(
     val reservePercent: Int = 0,
@@ -908,15 +977,7 @@ private fun Meter(
             }
             if (absolute.isNotEmpty()) append(", at $absolute")
             // The pace mark is visual; this is its sentence.
-            if (showPace) {
-                append(
-                    when (pace) {
-                        Pace.AHEAD -> ". Ahead of pace"
-                        Pace.BEHIND -> ". Behind pace"
-                        Pace.ON_PACE -> ". On pace"
-                    },
-                )
-            }
+            if (showPace) append(paceSentence(pace))
         }
     }) {
         Row {
@@ -991,17 +1052,7 @@ private fun Meter(
             // that is about the clock rather than the policy. Pace remains in
             // the accessibility sentence; the visual mark is always white so
             // every meter has the same easily scanned landmark.
-            if (showPace) {
-                val mark = paceMarkPercent(elapsedPercent)
-                Box(
-                    Modifier
-                        .offset(x = (maxWidth * mark / 100f - 1.dp).coerceIn(0.dp, maxWidth - 2.dp))
-                        .width(2.dp)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(TextPrimary),
-                )
-            }
+            if (showPace) PaceMark(elapsedPercent, maxWidth)
         }
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1082,3 +1133,183 @@ private fun MinuteTick() {
     }
     @Suppress("UNUSED_EXPRESSION") minute
 }
+
+
+/**
+ * Banked resets by kind: "Full 1 · Fable 3", tappable to list each kind's
+ * deadlines and why any cannot be spent now. Starts open on an account page,
+ * where there is room, and collapsed elsewhere.
+ */
+@Composable
+private fun BankedResetKinds(provider: ProviderUsage, kinds: List<ResetKindGroup>, expanded: Boolean) {
+    var open by remember(provider.id) { mutableStateOf(expanded) }
+    val count = provider.resetCredits?.available ?: 0
+    val summary = resetKindsSummary(provider)
+    Column(Modifier.fillMaxWidth()) {
+        // Only the summary row toggles; the expanded lines stay separate
+        // nodes so TalkBack can read each deadline and note.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .testTag(BANKED_RESET_KINDS_TAG)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Banked quota resets: $count available. $summary. " +
+                        if (open) "Tap to hide details" else "Tap to show details"
+                },
+        ) {
+            Text("Banked quota resets", color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.weight(1f))
+            Text(
+                summary,
+                color = if (count > 0) TextPrimary else TextMuted,
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            )
+            Text(if (open) "  ▴" else "  ▾", color = TextMuted, fontSize = 11.sp)
+        }
+        if (open) {
+            kinds.filter { it.available > 0 || it.held > 0 }.forEach { group ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "${group.label} · ${group.available} available" + if (group.held > 0) " · ${group.held} held" else "",
+                    color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                )
+                resetKindLines(group).forEach { line ->
+                    Text(line, color = TextMuted, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+const val BANKED_RESET_KINDS_TAG = "banked-reset-kinds"
+
+/**
+ * The neutral tile beside "OpenAI API credits" and "Claude API credits": a
+ * dollar sign. The Android app draws no provider artwork for any account.
+ */
+@Composable
+private fun CreditsGlyph() {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(22.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Line)
+            // Decorative: the provider name beside it is what is read.
+            .clearAndSetSemantics {},
+    ) {
+        Text("$", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    }
+}
+
+/**
+ * A credits account's dollar headline, the promotional credit bar and when it
+ * lapses. Dollars throughout: never a percent headline, never a week or month.
+ */
+@Composable
+internal fun CreditsHeadline(credits: CreditsView) {
+    val line = creditsExpiryLine(credits)
+    Column(
+        modifier = Modifier
+            .testTag(CREDITS_HEADLINE_TAG)
+            .semantics(mergeDescendants = true) {
+                contentDescription = listOf(credits.headline, credits.promoLabel.takeIf { !credits.signedOut }.orEmpty(), line)
+                    .filter { it.isNotEmpty() }.joinToString(". ")
+            },
+    ) {
+        Spacer(Modifier.height(10.dp))
+        Text(
+            credits.headline,
+            color = when {
+                credits.signedOut -> Danger
+                credits.stale -> TextMuted
+                else -> TextPrimary
+            },
+            fontSize = 22.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+        )
+        if (!credits.signedOut) {
+            Spacer(Modifier.height(8.dp))
+            Row {
+                Text("Promotional credit", color = TextPrimary, fontSize = 13.sp)
+                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.weight(1f))
+                Text(
+                    credits.promoLabel,
+                    color = if (credits.stale) TextMuted else TextPrimary,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { credits.remainingPercent / 100f },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                color = if (credits.stale) TextMuted.copy(alpha = 0.5f) else toneFor(credits.remainingPercent),
+                trackColor = Line,
+            )
+        }
+        if (line.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text(line, color = if (credits.signedOut) Danger else TextMuted, fontSize = 11.sp)
+        }
+    }
+}
+
+/**
+ * The credits decision's dot, as the accounts carousel colours dispatch: green
+ * when it admits work, amber when the decision is unknown or the balance is out
+ * of date or signed out, otherwise grey. A hold is not an error, so never red.
+ */
+internal fun creditsDecisionTone(provider: ProviderUsage): Color = when {
+    provider.scheduling?.admits == true -> Good
+    provider.scheduling?.decision == "UNKNOWN" -> Warn
+    provider.isOutOfDate || provider.accountStatus == "signed_out" -> Warn
+    provider.credits?.let { it.stale || it.signedOut } == true -> Warn
+    else -> TextMuted
+}
+
+/**
+ * Under the scheduler's line: when jobs start, other credit (shown, never
+ * scheduled) and every grant with money left.
+ */
+@Composable
+internal fun CreditsBreakdown(credits: CreditsView) {
+    Column(Modifier.fillMaxWidth()) {
+        if (credits.ruleLine.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Text(credits.ruleLine, color = TextMuted, fontSize = 11.sp)
+        }
+        if (credits.paidLabel.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.semantics(mergeDescendants = true) {}) {
+                Text("Other credit", color = TextMuted, fontSize = 11.sp)
+                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.weight(1f))
+                Text(credits.paidLabel, color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+        if (credits.grants.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("GRANTS", color = TextMuted, fontSize = 10.sp, letterSpacing = 1.sp)
+            credits.grants.forEach { grant ->
+                Spacer(Modifier.height(6.dp))
+                Column(Modifier.semantics(mergeDescendants = true) {}) {
+                    Row {
+                        Text(grant.label, color = TextPrimary, fontSize = 12.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.weight(1f))
+                        Text(grant.amountLabel, color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    Text(creditGrantExpiry(grant), color = TextMuted, fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+const val CREDITS_HEADLINE_TAG = "credits-headline"

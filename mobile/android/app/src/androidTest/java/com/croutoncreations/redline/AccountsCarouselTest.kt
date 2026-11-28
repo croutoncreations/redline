@@ -18,6 +18,9 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getBoundsInRoot
@@ -130,6 +133,25 @@ class AccountsCarouselTest {
         compose.waitForIdle()
         shown("Not reported")
         if (hold) Thread.sleep(15_000)
+    }
+
+    @Test
+    fun bankedResetsAreShownByKindAndExpandToTheirDeadlines() {
+        show(CarouselFixtures.withResetKinds)
+        compose.onNodeWithTag(CAROUSEL_NEXT_TAG).performClick()
+        compose.waitForIdle()
+        // An account page opens the list: each kind with its own deadlines.
+        shown("Full 1 · Fable 3 (+1 held)")
+        shown("Full · 1 available")
+        shown("Fable · 3 available · 1 held")
+        shown("All expire", substring = true)
+        shown("1 paused")
+        if (hold) captureForReview("banked-reset-kinds-expanded")
+        // Tapping folds it back to the summary.
+        compose.onNodeWithTag(BANKED_RESET_KINDS_TAG).performClick()
+        compose.waitForIdle()
+        assertTrue(compose.onAllNodesWithText("Full · 1 available").fetchSemanticsNodes().isEmpty())
+        shown("Full 1 · Fable 3 (+1 held)")
     }
 
     @Test
@@ -348,6 +370,14 @@ class AccountsCarouselTest {
     }
 
     /** At least one node with this text is on screen (the pager may hold a neighbour off screen). */
+    /** Saves the screen to the app's external files for a human to look at. */
+    private fun captureForReview(name: String) {
+        val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+        val directory = InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir("screenshots")!!
+        directory.mkdirs()
+        java.io.File(directory, "$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
     private fun shown(text: String, substring: Boolean = false) {
         val nodes = compose.onAllNodesWithText(text, substring = substring)
         val count = nodes.fetchSemanticsNodes().size

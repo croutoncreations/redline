@@ -105,6 +105,17 @@ func signInGuidance(provider, card string, profileDir ...string) string {
 			"Redline never asks for a password or token."
 	case "codex":
 		return "Uses the Codex login on the Mac running Redline. Sign in there yourself with `codex login`."
+	case config.ProviderAPICredits:
+		return "Reads the OpenAI API credit grants of the linked organization with a platform session key, and runs pi and command jobs with " +
+			"that organization's API key. On the machine running Redline, paste the Authorization value of the credit_grants request from " +
+			"platform.openai.com › Settings › Billing › Credit grants into `redline account set-session-key ID`, and an sk-… key into " +
+			"`redline account set-api-key ID`. Keys are stored on that machine only and never sent to phones."
+	case config.ProviderAnthropicAPICredits:
+		return "Reads the Claude API credits of the linked Claude Console organization with a Console session key, and runs claude-code, pi and " +
+			"command jobs with that organization's API key. On the machine running Redline, paste the sessionKey cookie from platform.claude.com " +
+			"into `redline account set-session-key ID`, and a personal (sk-ant-usr…) or service account (sk-ant-svc…) key, or a legacy " +
+			"sk-ant-api… workspace key, from the linked Console org and scoped to one workspace (ideally a dedicated redline workspace " +
+			"with a spend limit) into `redline account set-api-key ID`. Keys are stored on that machine only and never sent to phones."
 	default:
 		return "Sign in with the provider's own app or CLI on the Mac running Redline."
 	}
@@ -238,6 +249,16 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	account := config.ManagedAccount{ID: strings.TrimSpace(request.ID), Provider: strings.ToLower(strings.TrimSpace(request.Provider))}
 	if account.Provider == "" {
 		writeJSON(w, http.StatusBadRequest, problem{Error: "provider is required"})
+		return
+	}
+	switch config.APICreditsVendor(account.Provider) {
+	case config.APICreditsVendorOpenAI:
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_account",
+			Error: "OpenAI API credits accounts are added on the machine running Redline with `redline account add-openai-credits`, so their keys never pass through the API"})
+		return
+	case config.APICreditsVendorAnthropic:
+		writeJSON(w, http.StatusBadRequest, problem{Code: "invalid_account",
+			Error: "Claude API credits accounts are added on the machine running Redline with `redline account add-claude-credits`, so their keys never pass through the API"})
 		return
 	}
 	if account.Provider != "claude" && account.Provider != "codex" {

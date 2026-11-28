@@ -29,8 +29,18 @@ type outcome struct {
 type job struct {
 	registration store.PushRegistration
 	hint         WakeHint
-	done         chan outcome
+	// waiters receive this wake's outcome exactly once. A follow-up wake can
+	// carry several, one per waited dispatch merged into it.
+	waiters []chan outcome
 }
+
+// answer reports the wake's outcome to every waited dispatch counting on it.
+func (j job) answer(result outcome) {
+	for _, done := range j.waiters {
+		done <- result
+	}
+}
+
 type Dispatcher struct {
 	store     Store
 	issuer    string
@@ -41,10 +51,17 @@ type Dispatcher struct {
 	mu        sync.Mutex
 	queue     chan job
 	pending   map[string]bool
-	closed    bool
-	started   bool
-	stats     Stats
-	workers   sync.WaitGroup
+	// inFlight marks devices whose wake is being sent. A delivery that
+	// arrives then may postdate the device's fetch, so it records one
+	// follow-up wake instead of being dropped. A waited dispatch always
+	// records the follow-up for a pending device, so the wake it counts
+	// carries its hint. Guarded by mu.
+	inFlight map[string]bool
+	followUp map[string]job
+	closed   bool
+	started  bool
+	stats    Stats
+	workers  sync.WaitGroup
 	// unavailable is set while push is known to be unconfigured, so each
 	// outage logs once; a successful wake clears it. Guarded by mu.
 	unavailable bool
@@ -75,7 +92,7 @@ func NewDispatcher(s Store, issuer string, t Transport, logger *log.Logger) *Dis
 		logger = log.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &Dispatcher{store: s, issuer: issuer, transport: t, logger: logger, ctx: ctx, cancel: cancel, queue: make(chan job, 256), pending: map[string]bool{}}
+	d := &Dispatcher{store: s, issuer: issuer, transport: t, logger: logger, ctx: ctx, cancel: cancel, queue: make(chan job, 256), pending: map[string]bool{}, inFlight: map[string]bool{}, followUp: map[string]job{}}
 	return d
 }
 func (d *Dispatcher) Stats() Stats { d.mu.Lock(); defer d.mu.Unlock(); return d.stats }
@@ -127,19 +144,30 @@ func (d *Dispatcher) Dispatch(ctx context.Context, id int64, event string, wait 
 		}
 	}
 	for _, registration := range registrations {
-		if d.pending[registration.DeviceSessionID] {
-			d.stats.Coalesced++
-			continue
-		}
+		device := registration.DeviceSessionID
 		item := job{registration: registration, hint: WakeHint{DeliveryID: id, Kind: kind(event)}}
+		var done chan outcome
 		if wait {
-			item.done = make(chan outcome, 1)
+			done = make(chan outcome, 1)
+			item.waiters = []chan outcome{done}
+		}
+		if d.pending[device] {
+			d.stats.Coalesced++
+			if wait || d.inFlight[device] {
+				// The latest hint wins; earlier waiters still get an answer.
+				item.waiters = append(d.followUp[device].waiters, item.waiters...)
+				d.followUp[device] = item
+				if done != nil {
+					completions = append(completions, done)
+				}
+			}
+			continue
 		}
 		select {
 		case d.queue <- item:
-			d.pending[registration.DeviceSessionID] = true
-			if item.done != nil {
-				completions = append(completions, item.done)
+			d.pending[device] = true
+			if done != nil {
+				completions = append(completions, done)
 			}
 		default:
 			d.stats.Dropped++
@@ -166,7 +194,7 @@ func (d *Dispatcher) worker() {
 	defer d.workers.Done()
 	for item := range d.queue {
 		d.mu.Lock()
-		delete(d.pending, item.registration.DeviceSessionID)
+		d.inFlight[item.registration.DeviceSessionID] = true
 		d.mu.Unlock()
 		ok := false
 		configured := true
@@ -198,8 +226,31 @@ func (d *Dispatcher) worker() {
 			}
 			cancel()
 		}
-		if item.done != nil {
-			item.done <- outcome{woken: ok, configured: configured}
+		d.finish(item.registration.DeviceSessionID)
+		item.answer(outcome{woken: ok, configured: configured})
+	}
+}
+
+// finish releases a device after its wake and queues the follow-up wake
+// recorded while that wake was pending, if any. A follow-up that cannot be
+// queued answers its waiters as not woken.
+func (d *Dispatcher) finish(device string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.inFlight, device)
+	next, ok := d.followUp[device]
+	delete(d.followUp, device)
+	if ok && !d.closed {
+		select {
+		case d.queue <- next:
+			return
+		default:
+			d.stats.Dropped++
+			d.logger.Print("push queue full; wake dropped")
 		}
 	}
+	if ok {
+		next.answer(outcome{configured: true})
+	}
+	delete(d.pending, device)
 }

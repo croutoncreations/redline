@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -70,6 +71,7 @@ var knownNotificationEvents = map[string]bool{
 	"reset.announced": true,
 	"run.started":     true, "run.completed": true, "run.failed": true, "scheduler.error": true,
 	"reset.expiring": true, "reset.redeemed": true, "reset.redeem_failed": true, "firesale.started": true, "firesale.ended": true,
+	"account.needs_login": true, "account.session_key_needed": true,
 }
 
 func (c Config) NotificationTimeout() time.Duration {
@@ -214,6 +216,19 @@ type UsageMonitor struct {
 	Enabled          bool   `yaml:"enabled"`
 	PollInterval     string `yaml:"poll_interval"`
 	GatepostDatabase string `yaml:"gatepost_database"`
+	// KeepProfileLoginsFresh runs Claude Code under each Claude Code
+	// profile account shortly before its login expires, so Claude Code
+	// renews it. Nil (unset) is on; Redline itself never writes a login.
+	KeepProfileLoginsFresh *bool `yaml:"keep_profile_logins_fresh"`
+}
+
+// KeepProfileLoginsFresh reports whether profile logins are renewed in the
+// background. On unless set to false; not yet supported on Windows.
+func (c Config) KeepProfileLoginsFresh() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	return c.UsageMonitor.KeepProfileLoginsFresh == nil || *c.UsageMonitor.KeepProfileLoginsFresh
 }
 
 func (c Config) UsageMonitorInterval() (time.Duration, error) {
@@ -265,6 +280,8 @@ type Provider struct {
 	MaxConcurrentRuns int                   `yaml:"max_concurrent_runs"`
 	PoolConcurrency   map[string]int        `yaml:"pool_concurrency"`
 	ModelGroups       map[string]ModelGroup `yaml:"model_groups"`
+	// APICredits configures an API credits account; nil elsewhere.
+	APICredits *APICredits `yaml:"api_credits,omitempty"`
 }
 
 type BankedResets struct {
@@ -350,6 +367,10 @@ func (p Provider) EffectiveUsageSource() string {
 	// A Claude Code profile is read only from its own login: "auto" would
 	// try OpenUsage's default card first, which is a different account.
 	if strings.TrimSpace(p.ClaudeConfigDir) != "" {
+		return "native"
+	}
+	// API credits come only from the vendor's console; OpenUsage has none.
+	if p.IsAPICredits() {
 		return "native"
 	}
 	return "auto"
@@ -684,6 +705,9 @@ func validateAccountFields(name string, provider Provider) error {
 		return fmt.Errorf("provider %q: %w", name, err)
 	}
 	if err := provider.validateWeeklyPolicy(); err != nil {
+		return fmt.Errorf("provider %q: %w", name, err)
+	}
+	if err := validateAPICredits(provider); err != nil {
 		return fmt.Errorf("provider %q: %w", name, err)
 	}
 	source := provider.EffectiveUsageSource()

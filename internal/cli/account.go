@@ -13,7 +13,7 @@ import (
 	"github.com/croutoncreations/redline/internal/apiclient"
 )
 
-const accountUsage = `usage: redline account <list|add|edit|disable|enable|remove|discover|profiles|add-profile>
+const accountUsage = `usage: redline account <list|add|edit|disable|enable|remove|discover|profiles|add-profile|add-openai-credits|add-claude-credits|set-session-key|set-api-key|clear-keys>
 
   list                                   accounts, where each comes from, and their status
   discover <claude|codex>                OpenUsage cards on this Mac and which account reads each
@@ -25,6 +25,23 @@ const accountUsage = `usage: redline account <list|add|edit|disable|enable|remov
   edit <id> [--label L] [--card C] [--openusage-url URL] [--source S]
   disable <id> | enable <id>             keep an account on file but stop or restart watching it
   remove <id>                            forget a Redline-managed account (refused while profiles use it)
+
+API credits (run on the machine running Redline; keys are read from standard input):
+  add-openai-credits <id> [--org org-…] [--label L] [--min-balance USD] [--pacing firesale|even]
+                                         read and spend the API credits a ChatGPT subscription grants
+  add-claude-credits <id> [--organization-id UUID] [same flags]
+                                         read and spend the API credits a Claude subscription grants
+                                         to a linked Claude Console organization; with the sessionKey
+                                         cookie piped and --session-key-stdin, the organization is found:
+                                         pbpaste | redline account add-claude-credits <id> --session-key-stdin
+  set-session-key <id>                   session key used only to read the balance: platform.openai.com
+                                         (sess-…), or the sessionKey cookie from platform.claude.com (sk-ant-sid…)
+  set-api-key <id>                       API key runs are given: OpenAI sk-… (pi, command), or a Claude
+                                         personal (sk-ant-usr…), service account (sk-ant-svc…) or legacy
+                                         workspace (sk-ant-api…) key from the linked Console org, scoped to
+                                         one workspace (claude-code, pi, command; ideally a dedicated
+                                         redline workspace with a spend limit)
+  clear-keys <id>                        remove both keys
 
 add, edit and add-profile also accept --weekly-policy session_only and --session-reserve 0.50
 (Claude seats without reported weekly usage only; the reserve must be in [0,1)).

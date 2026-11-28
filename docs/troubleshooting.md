@@ -46,6 +46,51 @@ such as pull requests are clickable.
 Redline preserves isolated workspaces by default. Agent instructions and optional finalize hooks
 own commit, push, PR, and cleanup behavior.
 
+## An API credits account says "Session key needed"
+
+OpenAI and Claude API credits accounts read their balance with a browser session key, which
+expires. Until a fresh one is saved, work on the account holds. Copy a new key and save it on the
+machine running Redline:
+
+- OpenAI: the `Authorization` value (`sess-…`) of the `credit_grants` request on
+  platform.openai.com › Settings › Billing › Credit grants.
+- Claude: the `sessionKey` cookie (`sk-ant-sid…`) for platform.claude.com.
+
+```bash
+pbpaste | redline account set-session-key <account>
+```
+
+No restart is needed. Opt in to the `account.session_key_needed` notification to hear about this
+when it happens. See [OpenAI keys](scheduling.md#keys) and [Claude keys](scheduling.md#claude-keys).
+
+## API credits jobs stay queued
+
+An API credits account says why it is holding on its card:
+
+- **Holding credit** is the default `firesale` pacing working as intended: the promotional
+  balance is kept until it is within `firesale_window` (default 72 hours) of expiring. Set
+  `pacing: even` on the account to spend it steadily through the cycle instead, or start a
+  manual firesale with `redline firesale start --provider <account> --for 1h`.
+- **Held · at the floor** means the balance is at or below `min_promo_balance`.
+- **Held · run in flight** means the balance, less `run_cost_estimate` for each run already
+  running, would fall below the floor. Another job starts when one finishes.
+- **Held · no promotional credit** means there is no subscription grant in effect. Purchased
+  and other credit is shown as **Other credit** but is never spent.
+- With no saved API key, work holds rather than run with another key:
+  `pbpaste | redline account set-api-key <account>`. On a Claude account the key is a personal
+  (`sk-ant-usr…`) or service account (`sk-ant-svc…`) key, or a legacy `sk-ant-api…` workspace
+  key, scoped to one workspace: Redline can't send the `anthropic-workspace-id` header an
+  unscoped key needs.
+
+## A Claude API credits pi job exits with status 78
+
+A pi run on a Claude API credits account loads a small Redline extension that keeps every
+request on the account's API key. If a model can't be moved onto the key (for example, an
+`anthropic-cli` model with no API equivalent), or a request would go out on another provider,
+the extension ends the run with status 78 rather than spend a subscription login. Use an
+`anthropic/…` model the API offers, and don't add `--model`, `--provider` or `-e` to the
+profile's `harness_args`. See [Claude API credits](scheduling.md#claude-anthropic-api-credits).
+
 ## The app reports a dispatch error
 
 A dispatch error means Redline could not complete a scheduler check or launch operation; it does not

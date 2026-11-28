@@ -25,6 +25,29 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		name = provider
 	}
 	switch event.Type {
+	case domain.EventAccountSessionKeyNeeded:
+		label := d["label"]
+		if label == "" {
+			label = event.ProviderAccountID
+		}
+		if strings.EqualFold(provider, "anthropic-api-credits") {
+			event.Title = label + " needs a fresh Claude Console session key"
+			event.Message = "Claude API credits work is held on this account until you paste the sessionKey cookie from platform.claude.com " +
+				"on the computer running Redline: pbpaste | redline account set-session-key " + event.ProviderAccountID
+			break
+		}
+		event.Title = label + " needs a fresh OpenAI session key"
+		event.Message = "OpenAI API credits work is held on this account until you paste one on the computer running Redline: " +
+			"pbpaste | redline account set-session-key " + event.ProviderAccountID
+	case domain.EventAccountNeedsLogin:
+		label := d["label"]
+		if label == "" {
+			label = event.ProviderAccountID
+		}
+		dir := d["claude_config_dir"]
+		event.Title = label + " needs to sign in to Claude Code"
+		event.Message = "Its login can't be renewed in the background, so work is held on this account. Run CLAUDE_CONFIG_DIR=" +
+			shellPath(dir) + " claude and sign in with /login."
 	case domain.EventResetExpiring:
 		event.Title = name + " banked reset expiring"
 		count, _ := strconv.Atoi(d["count"])
@@ -136,4 +159,25 @@ func WithMessage(event domain.NotificationEvent, provider string) domain.Notific
 		}
 	}
 	return event
+}
+
+// shellPath writes a path so it can be pasted into a shell: as is when it
+// is plain, otherwise single-quoted with a leading "~/" left outside the
+// quotes so the shell still expands it.
+func shellPath(path string) string {
+	plain := true
+	for _, r := range path {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("~/._-+", r)) {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return path
+	}
+	prefix := ""
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		prefix, path = "~/", rest
+	}
+	return prefix + "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }

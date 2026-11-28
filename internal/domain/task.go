@@ -75,6 +75,14 @@ type ExecutionProfile struct {
 	// it in for one run from the run's account, so a claude-code run on an
 	// account bound to a Claude Code profile directory uses that login.
 	ClaudeConfigDir string `json:"-"`
+	// APICreditsVendor, APICreditsKey and APICreditsOrganization are not
+	// part of the stored profile either. The service fills them in for one
+	// run on an API credits account ("openai" or "anthropic", as
+	// config.APICreditsVendor names it), so the run bills exactly the
+	// organization whose credit it was scheduled against.
+	APICreditsVendor       string `json:"-"`
+	APICreditsKey          string `json:"-"`
+	APICreditsOrganization string `json:"-"`
 }
 
 type RuntimeConnection struct {
@@ -181,6 +189,13 @@ const (
 	EventResetRedeemFailed = "reset.redeem_failed"
 	EventFiresaleStarted   = "firesale.started"
 	EventFiresaleEnded     = "firesale.ended"
+	// EventAccountNeedsLogin: a Claude Code profile's login can no longer
+	// be renewed in the background; someone has to sign in again.
+	EventAccountNeedsLogin = "account.needs_login"
+	// EventAccountSessionKeyNeeded: an OpenAI API credits account's platform
+	// session key is missing or was rejected; its work holds until a fresh
+	// one is pasted on the machine running Redline.
+	EventAccountSessionKeyNeeded = "account.session_key_needed"
 )
 
 type NotificationEvent struct {

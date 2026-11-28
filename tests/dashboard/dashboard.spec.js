@@ -342,6 +342,26 @@ test('creates a scheduled job with tier and recurrence settings', async ({ page 
   expect(state.requests.find(item => item.path === '/v1/tasks').body).toMatchObject({ priority: 82, dispatch_tier: 'expiring', type: 'recurring', min_interval: '7d', require_repo_change: true, enabled: true });
 });
 
+test('announces priority help immediately in the keyboard job-creation flow', async ({ page }) => {
+  await loadDashboard(page);
+  await page.getByRole('button', { name: '+ New job' }).click();
+  await expect(page.locator('#task-dialog')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Close' }).focus();
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+
+  const help = page.getByRole('note', { name: /^Priority help:/ });
+  await expect(help).toBeFocused();
+  await expect(help).toHaveAccessibleName('Priority help: When several jobs are eligible at the same time, the one with the highest priority is dispatched first.');
+
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#task-priority')).toBeFocused();
+  await expect(page.locator('#task-priority')).toHaveAccessibleName('Priority');
+});
+
 test('creates a firesale job with an optional faster interval', async ({ page }) => {
   const state = await loadDashboard(page);
   await page.getByRole('button', { name: '+ New job' }).click();
@@ -1435,4 +1455,18 @@ test('scheduler instructions safely render unknown paths and support Windows hos
   await expect(page.locator('#scheduler-config-path img')).toHaveCount(0);
   await expect(page.locator('#scheduler-restart-command')).toContainText("tester's".replace("'", "''"));
   await expect(page.locator('#scheduler-config-fallback')).toBeHidden();
+});
+
+// A meter shows how much allowance is left: green while healthy, amber below
+// 35% and red below 15%. Red is for trouble, so a healthy bar is never red.
+test('allowance bars are green when healthy, amber when low and red when nearly gone', async ({ page }) => {
+  await loadDashboard(page);
+  const fill = await page.evaluate(() => Object.fromEntries([...document.styleSheets].flatMap(sheet => [...sheet.cssRules])
+    .filter(rule => rule.selectorText && /progress-value/.test(rule.selectorText))
+    .flatMap(rule => rule.selectorText.split(',').map(selector => [selector.trim(), rule.style.background || rule.style.backgroundColor]))));
+  for (const bar of ['.compact-progress', '.meter-progress']) {
+    expect(fill[`${bar}::-webkit-progress-value`]).toBe('var(--green)');
+    expect(fill[`${bar}.warn::-webkit-progress-value`]).toBe('var(--amber)');
+  }
+  expect(fill['.meter-progress.danger::-webkit-progress-value']).toBe('rgb(255, 123, 114)');
 });

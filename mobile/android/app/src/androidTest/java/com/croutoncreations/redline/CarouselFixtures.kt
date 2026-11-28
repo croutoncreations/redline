@@ -60,6 +60,25 @@ object CarouselFixtures {
 
     val threeAccounts = listOf(personal, client, side)
 
+    /** [personal] holding one full and three Fable resets, as Claude reports them. */
+    val withResetKinds: List<ProviderUsage> = run {
+        val full = readAt.plusSeconds(34 * 24 * HOUR).toString()
+        val fable = readAt.plusSeconds(117 * 24 * HOUR).toString()
+        listOf(
+            personal.copy(
+                bankedResets = 4,
+                resetCredits = ResetCredits(
+                    available = 4, expiries = listOf(full, fable, fable, fable), nextExpiresInSeconds = 34 * 24 * HOUR,
+                    kinds = listOf(
+                        ResetKindGroup("full", "Full", 1, expiries = listOf(full)),
+                        ResetKindGroup("fable", "Fable", 3, held = 1, expiries = listOf(fable, fable, fable), notes = listOf("1 paused")),
+                    ),
+                ),
+            ),
+            client, side,
+        )
+    }
+
     /** Weekly reset of [staleWithCredits], as last reported: three days out. */
     val staleWeeklyResetAt: java.time.Instant = readAt.plusSeconds(3 * 24 * HOUR)
 
