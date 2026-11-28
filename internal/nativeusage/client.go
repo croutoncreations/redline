@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -283,9 +284,13 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
-		if seconds <= 0 {
-			return 0
+	// ParseUint can report ErrRange as soon as a digit prefix overflows, before it
+	// looks at the rest. Only an all-digit value above uint64 is still a valid
+	// delay-seconds, and it saturates like any other oversized one.
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || (errors.Is(err, strconv.ErrRange) && allASCIIDigits(value)) {
+		const maxRetryAfter = time.Duration(1<<63 - 1)
+		if err != nil || seconds > uint64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
 		}
 		return time.Duration(seconds) * time.Second
 	}
@@ -293,6 +298,15 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return at.Sub(now)
 	}
 	return 0
+}
+
+func allASCIIDigits(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
 
 type claudeWindow struct {
