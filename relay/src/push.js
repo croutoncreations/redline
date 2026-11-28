@@ -64,7 +64,7 @@ export async function handlePush(request, env) {
       if (response.status === 429 || response.status >= 500) {
         throw new PushError(503, "push_upstream_unavailable");
       }
-      if (response.status === 404 || await isUnregistered(response)) {
+      if (await isUnregistered(response)) {
         return json(410, { code: "unregistered" });
       }
       throw new PushError(502, "push_upstream_error");
