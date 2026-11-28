@@ -214,13 +214,22 @@ async function live({github, accessAudit, queueClient, context, core, run=execFi
     }));
   }
 
+  function sweepError(pr, step, error) {
+    const message = String(error?.message ?? error).slice(0,300);
+    (report.sweep_errors ??= []).push({pr,step,error:message});
+    core.warning(`Queue sweep could not ${step} PR #${pr}: ${message}`);
+  }
   async function revalidateQueued(open) {
     report.dequeued = [];
     for (const listed of open) {
       const number = listed.number;
       if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid PR number');
-      const q = await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number});
-      const node = q?.repository?.pullRequest;
+      // A failed read can't prove who owns the entry, so it is recorded and
+      // the entry left alone (the required green-lane-queue gate still
+      // decides its merge); the sweep moves on to the next PR.
+      let node;
+      try { node = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest; }
+      catch (error) { sweepError(number, 'read', error); continue; }
       if (node?.isInMergeQueue !== true) continue;
       // Only PRs this worker queued; a PR Jon queued by hand is his call.
       if (!queuedByGreenLane(node.mergeQueueEntry)) continue;
@@ -247,10 +256,12 @@ async function live({github, accessAudit, queueClient, context, core, run=execFi
       // The evaluation can take minutes. Jon may have removed and re-queued the
       // PR by hand meanwhile; leave his entry alone. The mutation takes the PR
       // id, not the entry id, so re-read the entry just before removing it.
-      const again = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest;
-      if (again?.isInMergeQueue !== true || again.mergeQueueEntry?.id !== node.mergeQueueEntry.id || !queuedByGreenLane(again.mergeQueueEntry)) continue;
-      // Dequeue is the safe direction, so it is not gated on the kill switch.
-      await queueClient.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
+      try {
+        const again = (await github.graphql(entryQuery,{owner:repo.owner,repo:repo.repo,n:number}))?.repository?.pullRequest;
+        if (again?.isInMergeQueue !== true || again.mergeQueueEntry?.id !== node.mergeQueueEntry.id || !queuedByGreenLane(again.mergeQueueEntry)) continue;
+        // Dequeue is the safe direction, so it is not gated on the kill switch.
+        await queueClient.graphql(`mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`,{id:node.id});
+      } catch (error) { sweepError(number, 'dequeue', error); continue; }
       report.dequeued.push({pr:number,head:node.headRefOid,reason:String(reason).slice(0,500)});
       await write(report);
       core.warning(`Removed PR #${number} from the merge queue: ${reason}`);

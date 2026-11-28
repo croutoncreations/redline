@@ -263,6 +263,17 @@ test('queue mode: a re-check error on one queued PR removes it and the sweep car
  assert.deepEqual(f.queue.dequeues,['PR_1','PR_2']);assert.match(r.dequeued[0].reason,/re-check failed: evaluator crashed/);
  assert.equal(f.queue.enqueues.length,1,'the enqueue pass still runs');
 });
+test('queue mode: a failed entry read or dequeue is recorded, the entry left alone, and the sweep carries on',async()=>{
+ for(const failOn of ['first read','re-read','dequeue']){
+  const f=queueFixture();f.prs=[1,2,3];f.queue.inQueue=n=>n<=2;const gql=f.github.graphql,qc=f.queueClient.graphql;const reads={};
+  f.github.graphql=async(q,v)=>{if(q.includes('mergeQueueEntry')&&v.n===1){reads[1]=(reads[1]??0)+1;if((failOn==='first read'&&reads[1]===1)||(failOn==='re-read'&&reads[1]===2))throw new Error('502 from GitHub')}return gql(q,v)};
+  f.queueClient.graphql=async(q,v)=>{if(failOn==='dequeue'&&v.id==='PR_1')throw new Error('502 from GitHub');return qc(q,v)};
+  const inner=f.result;f.result=n=>n<=2?{...inner(n),verdict:'would_not_merge',rules:[{name:'Size',pass:false,message:'too big'}]}:inner(n);
+  const r=await runQueue(f);
+  assert.deepEqual(f.queue.dequeues,['PR_2'],failOn);assert.equal(r.sweep_errors.length,1,failOn);assert.equal(r.sweep_errors[0].pr,1);
+  assert.equal(f.queue.enqueues.length,1,`${failOn}: the enqueue pass still runs`);
+ }
+});
 test('queue mode: GitHub reporting a queued PR as not mergeable does not dequeue it',async()=>{
  const f=queueFixture();f.queue.inQueue=n=>n===1;const inner=f.result;
  f.result=n=>n===1?{...inner(n),verdict:'would_not_merge',rules:[{name:'PR State',pass:false,message:'PR mergeability is unknown or conflicted'},{pass:true}]}:inner(n);
