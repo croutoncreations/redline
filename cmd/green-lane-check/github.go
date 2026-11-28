@@ -460,10 +460,37 @@ func sameEvidence(a, b greenlane.PRInfo) bool {
 func (c *GitHubClient) doRequest(ctx context.Context, method, u string) ([]byte, error) {
 	return c.request(ctx, method, u, nil)
 }
+
+// retryBackoff is the wait before each retry of a transient GitHub failure.
+// Every request this client makes is a read (REST GET or GraphQL query), so a
+// retry cannot duplicate a side effect. Tests shorten it.
+var retryBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// transientStatus reports GitHub responses that are worth retrying: server
+// errors and gateway timeouts, which GitHub returns intermittently under load.
+func transientStatus(code int) bool {
+	return code == http.StatusInternalServerError || code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+}
+
 func (c *GitHubClient) request(ctx context.Context, method, u string, body []byte) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		data, retryable, err := c.requestOnce(ctx, method, u, body)
+		if err == nil || !retryable || attempt >= len(retryBackoff) {
+			return data, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(retryBackoff[attempt]):
+		}
+	}
+}
+
+func (c *GitHubClient) requestOnce(ctx context.Context, method, u string, body []byte) ([]byte, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -471,13 +498,16 @@ func (c *GitHubClient) request(ctx context.Context, method, u string, body []byt
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		// Transport failures (resets, HTTP/2 stream cancels, client timeouts)
+		// are retryable unless the caller's context is done.
+		return nil, ctx.Err() == nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GitHub API error %d", resp.StatusCode)
+		return nil, transientStatus(resp.StatusCode), fmt.Errorf("GitHub API error %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	return data, err != nil && ctx.Err() == nil, err
 }
 
 func (c *GitHubClient) reviewComments(ctx context.Context, n int) ([]greenlane.ReviewComment, error) {
