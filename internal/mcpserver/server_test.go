@@ -208,6 +208,63 @@ func TestHermesRuntimeAndContextToolsUseServiceAPI(t *testing.T) {
 	}
 }
 
+func TestRuntimeInventoryListsHonorDocumentedBounds(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/runtime-connections", func(w http.ResponseWriter, _ *http.Request) {
+		items := make([]map[string]any, 105)
+		for index := range items {
+			items[index] = map[string]any{
+				"id": fmt.Sprintf("runtime-%03d", index), "runtime": "hermes",
+				"transport": "local", "max_concurrent_runs": 1,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	})
+	mux.HandleFunc("GET /v1/agent-contexts", func(w http.ResponseWriter, _ *http.Request) {
+		items := make([]map[string]any, 105)
+		for index := range items {
+			items[index] = map[string]any{
+				"id":                    fmt.Sprintf("context-%03d", index),
+				"runtime_connection_id": "runtime-000", "session_mode": "isolated",
+				"max_concurrent_runs": 1,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	})
+	session := connect(t, mux)
+
+	for _, tool := range []string{"redline_runtime_connections_list", "redline_agent_contexts_list"} {
+		t.Run(tool+" default", func(t *testing.T) {
+			result := callTool(t, session, tool, map[string]any{})
+			if result.IsError {
+				t.Fatalf("list error: %s", contentText(result))
+			}
+			var output struct {
+				Count     int  `json:"count"`
+				Truncated bool `json:"truncated"`
+			}
+			decodeStructured(t, result, &output)
+			if output.Count != 20 || !output.Truncated {
+				t.Fatalf("output = %#v, want the documented default limit with truncation", output)
+			}
+		})
+		t.Run(tool+" cap", func(t *testing.T) {
+			result := callTool(t, session, tool, map[string]any{"limit": 200})
+			if result.IsError {
+				t.Fatalf("list error: %s", contentText(result))
+			}
+			var output struct {
+				Count     int  `json:"count"`
+				Truncated bool `json:"truncated"`
+			}
+			decodeStructured(t, result, &output)
+			if output.Count != 100 || !output.Truncated {
+				t.Fatalf("output = %#v, want the documented maximum limit with truncation", output)
+			}
+		})
+	}
+}
+
 func TestReadToolsBoundListsAndLogTails(t *testing.T) {
 	var requestedTail int
 	mux := http.NewServeMux()
