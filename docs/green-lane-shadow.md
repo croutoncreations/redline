@@ -219,7 +219,9 @@ GitHub's merge queue. Then:
   `main`), never from the merge group, so a queued PR can't change the code
   that judges it. It fails unless:
   - the queue is squash, only-merge-non-failing (ALLGREEN), one entry at a
-    time;
+    time. The gate reads these settings from the branch rules
+    (`GET /repos/{repo}/rules/branches/main`), because GitHub only shows the
+    GraphQL queue configuration to tokens with write access;
   - the merge-group commit is this PR's current queue entry: one squash commit
     directly on the base;
   - `main`, as the PR lands on it, changed no denied path since the PR's base
