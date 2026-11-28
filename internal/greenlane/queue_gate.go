@@ -133,16 +133,19 @@ func QueueGate(in QueueGateInput) error {
 	if sensitive := SensitiveDrift(in.LandingDrift, in.DeniedPaths); len(sensitive) > 0 {
 		return fmt.Errorf("main changed sensitive paths since PR #%d's base; update the branch and get a fresh review: %s", in.PRNumber, strings.Join(sensitive, ", "))
 	}
-	if !in.LandedFilesKnown {
-		return fmt.Errorf("could not list what PR #%d's merge commit changes", in.PRNumber)
-	}
-	if sensitive := SensitiveDrift(in.LandedFiles, in.DeniedPaths); len(sensitive) > 0 {
-		return fmt.Errorf("PR #%d's merge commit changes sensitive paths: %s", in.PRNumber, strings.Join(sensitive, ", "))
-	}
 	switch {
 	case in.HumanEnqueue():
-		return nil // queued by hand: only the path and binding guards apply
+		// Queued by hand: Jon's enqueue is the authorization, including for
+		// PRs that touch denied paths, which only he may merge. Only the
+		// binding and Main Drift guards above apply.
+		return nil
 	case in.GreenLaneEnqueue():
+		if !in.LandedFilesKnown {
+			return fmt.Errorf("could not list what PR #%d's merge commit changes", in.PRNumber)
+		}
+		if sensitive := SensitiveDrift(in.LandedFiles, in.DeniedPaths); len(sensitive) > 0 {
+			return fmt.Errorf("PR #%d's merge commit changes sensitive paths: %s", in.PRNumber, strings.Join(sensitive, ", "))
+		}
 	case in.EnqueuerType == "":
 		return fmt.Errorf("could not tell who queued PR #%d", in.PRNumber)
 	default:
