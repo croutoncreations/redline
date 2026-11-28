@@ -222,28 +222,37 @@ labels(first:100){totalCount nodes{name}}}}}`
 	return out, nil
 }
 
-// queueConfig reads the merge-queue rule that applies to branch. More than
-// one merge_queue rule (several rulesets) is treated as unreadable.
+// queueConfig reads the merge-queue rule that applies to branch, across every
+// page of the branch rules. More than one merge_queue rule (several
+// rulesets) is treated as unreadable.
 func (c *GitHubClient) queueConfig(ctx context.Context, branch string) (greenlane.QueueConfig, error) {
-	data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/rules/branches/%s?per_page=100", c.apiBase, c.owner, c.repo, url.PathEscape(branch)))
-	if err != nil {
-		return greenlane.QueueConfig{}, err
-	}
-	var rules []struct {
-		Type       string `json:"type"`
-		Parameters struct {
-			MergeMethod      string `json:"merge_method"`
-			GroupingStrategy string `json:"grouping_strategy"`
-			MaxBuild         int    `json:"max_entries_to_build"`
-		} `json:"parameters"`
-	}
-	if err := json.Unmarshal(data, &rules); err != nil {
-		return greenlane.QueueConfig{}, err
-	}
 	var found []greenlane.QueueConfig
-	for _, r := range rules {
-		if r.Type == "merge_queue" {
-			found = append(found, greenlane.QueueConfig{MergeMethod: r.Parameters.MergeMethod, MergingStrategy: r.Parameters.GroupingStrategy, MaxEntriesBuild: r.Parameters.MaxBuild})
+	for page := 1; ; page++ {
+		if page > 10 {
+			return greenlane.QueueConfig{}, fmt.Errorf("branch rules for %s exceed 10 pages", branch)
+		}
+		data, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s/rules/branches/%s?per_page=100&page=%d", c.apiBase, c.owner, c.repo, url.PathEscape(branch), page))
+		if err != nil {
+			return greenlane.QueueConfig{}, err
+		}
+		var rules []struct {
+			Type       string `json:"type"`
+			Parameters struct {
+				MergeMethod      string `json:"merge_method"`
+				GroupingStrategy string `json:"grouping_strategy"`
+				MaxBuild         int    `json:"max_entries_to_build"`
+			} `json:"parameters"`
+		}
+		if err := json.Unmarshal(data, &rules); err != nil {
+			return greenlane.QueueConfig{}, err
+		}
+		for _, r := range rules {
+			if r.Type == "merge_queue" {
+				found = append(found, greenlane.QueueConfig{MergeMethod: r.Parameters.MergeMethod, MergingStrategy: r.Parameters.GroupingStrategy, MaxEntriesBuild: r.Parameters.MaxBuild})
+			}
+		}
+		if len(rules) < 100 {
+			break
 		}
 	}
 	if len(found) != 1 {

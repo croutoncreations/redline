@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -328,6 +329,44 @@ func TestQueueConfig(t *testing.T) {
 	if got, err := serve(append([]any{other}, realQueueRules...), 200).queueConfig(ctx, "main"); err != nil || got.MergeMethod != "SQUASH" {
 		t.Fatalf("other rules must be ignored: %+v %v", got, err)
 	}
+	// Pagination: the queue rule on page 2 behind 100 unrelated rules is
+	// found, and a second queue rule on a later page is still counted.
+	filler := make([]any, 100)
+	for i := range filler {
+		filler[i] = other
+	}
+	paged := func(pages ...[]any) (*GitHubClient, *[]string) {
+		var seen []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen = append(seen, r.URL.Query().Get("page"))
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("per_page = %q", r.URL.Query().Get("per_page"))
+			}
+			i := 0
+			fmt.Sscanf(r.URL.Query().Get("page"), "%d", &i)
+			if i < 1 || i > len(pages) {
+				_ = json.NewEncoder(w).Encode([]any{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pages[i-1])
+		}))
+		t.Cleanup(server.Close)
+		return &GitHubClient{token: "t", owner: "o", repo: "r", apiBase: server.URL, client: server.Client()}, &seen
+	}
+	c, seen := paged(filler, realQueueRules)
+	if got, err := c.queueConfig(ctx, "main"); err != nil || got.MergeMethod != "SQUASH" || len(*seen) != 2 {
+		t.Fatalf("queue rule on page 2: %+v %v pages=%v", got, err, *seen)
+	}
+	withQueue := append(append([]any{}, filler[:99]...), realQueueRules...)
+	if c, _ := paged(withQueue, realQueueRules); func() error { _, err := c.queueConfig(ctx, "main"); return err }() == nil {
+		t.Fatal("second queue rule on page 2 not counted")
+	}
+	// Exactly 100 rules on the last page: one more (empty) page is read.
+	c, seen = paged(withQueue)
+	if _, err := c.queueConfig(ctx, "main"); err != nil || len(*seen) != 2 {
+		t.Fatalf("full last page: %v pages=%v", err, *seen)
+	}
+
 	for name, c := range map[string]*GitHubClient{
 		"no queue rule": serve([]any{other}, 200),
 		"two queues":    serve(append(append([]any{}, realQueueRules...), realQueueRules...), 200),
